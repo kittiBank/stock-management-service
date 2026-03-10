@@ -4,6 +4,7 @@ import {
   NotFoundException,
   ConflictException,
   BadRequestException,
+  InternalServerErrorException,
 } from "@nestjs/common";
 import { PrismaService } from "../prisma";
 import {
@@ -44,110 +45,179 @@ export class UsersService {
 
   // Create user - validate unique username, hash password
   async create(dto: CreateUserDto): Promise<UserResponseDto> {
-    const existingUser = await this.prisma.users.findUnique({
-      where: { username: dto.username },
-    });
-
-    if (existingUser) {
-      throw new ConflictException("Username already exists");
+    // Validate required fields
+    if (!dto.username) {
+      throw new BadRequestException("Username is required");
+    }
+    if (!dto.password) {
+      throw new BadRequestException("Password is required");
+    }
+    if (!dto.firstname) {
+      throw new BadRequestException("Firstname is required");
+    }
+    if (!dto.lastname) {
+      throw new BadRequestException("Lastname is required");
+    }
+    if (!dto.createdBy) {
+      throw new BadRequestException("Created by is required");
     }
 
-    const now = new Date();
-    const user = await this.prisma.users.create({
-      data: {
-        username: dto.username,
-        password: this.hashPassword(dto.password),
-        firstname: dto.firstname,
-        lastname: dto.lastname,
-        role: dto.role || "STAFF",
-        is_active: true,
-        created_by: dto.createdBy,
-        created_at: now,
-        updated_by: dto.createdBy,
-        updated_at: now,
-      },
-    });
+    try {
+      const existingUser = await this.prisma.users.findUnique({
+        where: { username: dto.username },
+      });
 
-    return this.toResponseDto(user);
+      if (existingUser) {
+        throw new ConflictException("Username already exists");
+      }
+
+      const now = new Date();
+      const user = await this.prisma.users.create({
+        data: {
+          username: dto.username,
+          password: this.hashPassword(dto.password),
+          firstname: dto.firstname,
+          lastname: dto.lastname,
+          role: dto.role || "STAFF",
+          is_active: true,
+          created_by: dto.createdBy,
+          created_at: now,
+          updated_by: dto.createdBy,
+          updated_at: now,
+        },
+      });
+
+      return this.toResponseDto(user);
+    } catch (error) {
+      if (
+        error instanceof ConflictException ||
+        error instanceof BadRequestException
+      ) {
+        throw error;
+      }
+      if (
+        error instanceof Error &&
+        "code" in error &&
+        (error as any).code === "P2002"
+      ) {
+        throw new ConflictException("Username already exists");
+      }
+      throw new InternalServerErrorException("Failed to create user");
+    }
   }
 
   // Find all users with optional search
   async findAll(
     query: QueryUserDto,
   ): Promise<{ data: UserResponseDto[]; total: number }> {
-    const page = query.page || 1;
-    const limit = query.limit || 10;
-    const skip = (page - 1) * limit;
+    try {
+      const page = query.page || 1;
+      const limit = query.limit || 10;
+      const skip = (page - 1) * limit;
 
-    const where: any = {};
+      const where: any = {};
 
-    if (query.search) {
-      where.OR = [
-        { username: { contains: query.search, mode: "insensitive" } },
-        { firstname: { contains: query.search, mode: "insensitive" } },
-        { lastname: { contains: query.search, mode: "insensitive" } },
-      ];
+      if (query.search) {
+        where.OR = [
+          { username: { contains: query.search, mode: "insensitive" } },
+          { firstname: { contains: query.search, mode: "insensitive" } },
+          { lastname: { contains: query.search, mode: "insensitive" } },
+        ];
+      }
+
+      if (query.role) {
+        where.role = query.role;
+      }
+
+      if (query.isActive !== undefined) {
+        where.is_active = query.isActive;
+      }
+
+      const [users, total] = await Promise.all([
+        this.prisma.users.findMany({
+          where,
+          skip,
+          take: limit,
+          orderBy: { created_at: "desc" },
+        }),
+        this.prisma.users.count({ where }),
+      ]);
+
+      return {
+        data: users.map((user) => this.toResponseDto(user)),
+        total,
+      };
+    } catch (error) {
+      throw new InternalServerErrorException("Failed to fetch users");
     }
-
-    if (query.role) {
-      where.role = query.role;
-    }
-
-    if (query.isActive !== undefined) {
-      where.is_active = query.isActive;
-    }
-
-    const [users, total] = await Promise.all([
-      this.prisma.users.findMany({
-        where,
-        skip,
-        take: limit,
-        orderBy: { created_at: "desc" },
-      }),
-      this.prisma.users.count({ where }),
-    ]);
-
-    return {
-      data: users.map((user) => this.toResponseDto(user)),
-      total,
-    };
   }
 
   // Find one user by ID
   async findOne(id: string): Promise<UserResponseDto> {
-    const user = await this.prisma.users.findUnique({
-      where: { id },
-    });
-
-    if (!user) {
-      throw new NotFoundException("User not found");
+    if (!id) {
+      throw new BadRequestException("User ID is required");
     }
 
-    return this.toResponseDto(user);
+    try {
+      const user = await this.prisma.users.findUnique({
+        where: { id },
+      });
+
+      if (!user) {
+        throw new NotFoundException("User not found");
+      }
+
+      return this.toResponseDto(user);
+    } catch (error) {
+      if (
+        error instanceof NotFoundException ||
+        error instanceof BadRequestException
+      ) {
+        throw error;
+      }
+      throw new InternalServerErrorException("Failed to fetch user");
+    }
   }
 
   // Update user - validate existence, update fields
   async update(id: string, dto: UpdateUserDto): Promise<UserResponseDto> {
-    const user = await this.prisma.users.findUnique({
-      where: { id },
-    });
-
-    if (!user) {
-      throw new NotFoundException("User not found");
+    if (!id) {
+      throw new BadRequestException("User ID is required");
+    }
+    if (!dto.updatedBy) {
+      throw new BadRequestException("Updated by is required");
     }
 
-    const updatedUser = await this.prisma.users.update({
-      where: { id },
-      data: {
-        ...(dto.firstname && { firstname: dto.firstname }),
-        ...(dto.lastname && { lastname: dto.lastname }),
-        ...(dto.role && { role: dto.role }),
-        updated_by: dto.updatedBy,
-        updated_at: new Date(),
-      },
-    });
+    try {
+      const user = await this.prisma.users.findUnique({
+        where: { id },
+      });
 
-    return this.toResponseDto(updatedUser);
+      if (!user) {
+        throw new NotFoundException("User not found");
+      }
+
+      const updatedUser = await this.prisma.users.update({
+        where: { id },
+        data: {
+          ...(dto.firstname && { firstname: dto.firstname }),
+          ...(dto.lastname && { lastname: dto.lastname }),
+          ...(dto.role && { role: dto.role }),
+          updated_by: dto.updatedBy,
+          updated_at: new Date(),
+        },
+      });
+
+      return this.toResponseDto(updatedUser);
+    } catch (error) {
+      if (
+        error instanceof NotFoundException ||
+        error instanceof BadRequestException
+      ) {
+        throw error;
+      }
+      throw new InternalServerErrorException("Failed to update user");
+    }
   }
 
   // Change user password - validate current password, hash new password
@@ -155,71 +225,128 @@ export class UsersService {
     id: string,
     dto: ChangePasswordDto,
   ): Promise<{ message: string }> {
-    const user = await this.prisma.users.findUnique({
-      where: { id },
-    });
-
-    if (!user) {
-      throw new NotFoundException("User not found");
+    if (!id) {
+      throw new BadRequestException("User ID is required");
+    }
+    if (!dto.currentPassword) {
+      throw new BadRequestException("Current password is required");
+    }
+    if (!dto.newPassword) {
+      throw new BadRequestException("New password is required");
+    }
+    if (!dto.updatedBy) {
+      throw new BadRequestException("Updated by is required");
     }
 
-    if (!this.verifyPassword(dto.currentPassword, user.password)) {
-      throw new BadRequestException("Current password is incorrect");
+    try {
+      const user = await this.prisma.users.findUnique({
+        where: { id },
+      });
+
+      if (!user) {
+        throw new NotFoundException("User not found");
+      }
+
+      if (!this.verifyPassword(dto.currentPassword, user.password)) {
+        throw new BadRequestException("Current password is incorrect");
+      }
+
+      await this.prisma.users.update({
+        where: { id },
+        data: {
+          password: this.hashPassword(dto.newPassword),
+          updated_by: dto.updatedBy,
+          updated_at: new Date(),
+        },
+      });
+
+      return { message: "Password changed successfully" };
+    } catch (error) {
+      if (
+        error instanceof NotFoundException ||
+        error instanceof BadRequestException
+      ) {
+        throw error;
+      }
+      throw new InternalServerErrorException("Failed to change password");
     }
-
-    await this.prisma.users.update({
-      where: { id },
-      data: {
-        password: this.hashPassword(dto.newPassword),
-        updated_by: dto.updatedBy,
-        updated_at: new Date(),
-      },
-    });
-
-    return { message: "Password changed successfully" };
   }
 
   // Deactivate user - validate existence, set isActive to false
   async deactivate(id: string, updatedBy: string): Promise<UserResponseDto> {
-    const user = await this.prisma.users.findUnique({
-      where: { id },
-    });
-
-    if (!user) {
-      throw new NotFoundException("User not found");
+    if (!id) {
+      throw new BadRequestException("User ID is required");
+    }
+    if (!updatedBy) {
+      throw new BadRequestException("Updated by is required");
     }
 
-    const updatedUser = await this.prisma.users.update({
-      where: { id },
-      data: {
-        is_active: false,
-        updated_by: updatedBy,
-        updated_at: new Date(),
-      },
-    });
+    try {
+      const user = await this.prisma.users.findUnique({
+        where: { id },
+      });
 
-    return this.toResponseDto(updatedUser);
+      if (!user) {
+        throw new NotFoundException("User not found");
+      }
+
+      const updatedUser = await this.prisma.users.update({
+        where: { id },
+        data: {
+          is_active: false,
+          updated_by: updatedBy,
+          updated_at: new Date(),
+        },
+      });
+
+      return this.toResponseDto(updatedUser);
+    } catch (error) {
+      if (
+        error instanceof NotFoundException ||
+        error instanceof BadRequestException
+      ) {
+        throw error;
+      }
+      throw new InternalServerErrorException("Failed to deactivate user");
+    }
   }
 
   // Activate user - validate existence, set isActive to true
   async activate(id: string, updatedBy: string): Promise<UserResponseDto> {
-    const user = await this.prisma.users.findUnique({
-      where: { id },
-    });
-
-    if (!user) {
-      throw new NotFoundException("User not found");
+    if (!id) {
+      throw new BadRequestException("User ID is required");
+    }
+    if (!updatedBy) {
+      throw new BadRequestException("Updated by is required");
     }
 
-    const updatedUser = await this.prisma.users.update({
-      where: { id },
-      data: {
-        is_active: true,
-        updated_by: updatedBy,
-        updated_at: new Date(),
-      },
-    });
+    try {
+      const user = await this.prisma.users.findUnique({
+        where: { id },
+      });
 
-    return this.toResponseDto(updatedUser);
+      if (!user) {
+        throw new NotFoundException("User not found");
+      }
+
+      const updatedUser = await this.prisma.users.update({
+        where: { id },
+        data: {
+          is_active: true,
+          updated_by: updatedBy,
+          updated_at: new Date(),
+        },
+      });
+
+      return this.toResponseDto(updatedUser);
+    } catch (error) {
+      if (
+        error instanceof NotFoundException ||
+        error instanceof BadRequestException
+      ) {
+        throw error;
+      }
+      throw new InternalServerErrorException("Failed to activate user");
+    }
   }
 }
